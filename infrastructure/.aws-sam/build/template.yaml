@@ -1,0 +1,137 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: "\u547D\u540D\u30B8\u30A7\u30CD\u30EC\u30FC\u30BF\u30FC\u30A4\u30F3\u30D5\
+  \u30E9 (SAM\u7248)"
+Parameters:
+  CIDRBlock:
+    Type: String
+    Description: "\u793E\u5185IP\u30A2\u30C9\u30EC\u30B9(CIDR)"
+Resources:
+  NamingRuleTable:
+    Type: AWS::Serverless::SimpleTable
+    Properties:
+      TableName: naming-rule-table
+      PrimaryKey:
+        Name: RULE_ID
+        Type: String
+  NamingGeneratorFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: naming-generator-lambda
+      Runtime: python3.12
+      Handler: app.lambda_handler
+      CodeUri: NamingGeneratorFunction
+      Policies:
+      - DynamoDBReadPolicy:
+          TableName: naming-rule-table
+      Events:
+        NamingApi:
+          Type: Api
+          Properties:
+            Path: /naming
+            Method: get
+            RestApiId:
+              Ref: NamingApi
+            Auth:
+              ResourcePolicy:
+                IpRangeWhitelist:
+                - Ref: CIDRBlock
+        NamingApiOptions:
+          Type: Api
+          Properties:
+            Path: /naming
+            Method: options
+            RestApiId:
+              Ref: NamingApi
+            Auth:
+              ResourcePolicy:
+                IpRangeWhitelist:
+                - Ref: CIDRBlock
+    Metadata:
+      SamResourceId: NamingGeneratorFunction
+  NamingApi:
+    Type: AWS::Serverless::Api
+    Properties:
+      Name: naming-generator-api
+      StageName: prod
+      Cors:
+        AllowOrigin: '''*'''
+        AllowMethods: '''GET,OPTIONS'''
+        AllowHeaders: '''Content-Type,Authorization'''
+  FrontendBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: naming-generator-frontend-bucket
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: false
+        BlockPublicPolicy: false
+        IgnorePublicAcls: false
+        RestrictPublicBuckets: false
+  FrontendBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket:
+        Ref: FrontendBucket
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+        - Sid: PublicReadGetObject
+          Effect: Allow
+          Principal: '*'
+          Action: s3:GetObject
+          Resource:
+            Fn::Sub: ${FrontendBucket.Arn}/*
+          Condition:
+            IpAddress:
+              aws:SourceIp:
+                Ref: CIDRBlock
+  FrontendOAC:
+    Type: AWS::CloudFront::OriginAccessControl
+    Properties:
+      OriginAccessControlConfig:
+        Name:
+          Fn::Sub: ${AWS::StackName}-oac
+        SigningProtocol: sigv4
+        SigningBehavior: always
+        OriginAccessControlOriginType: s3
+  FrontendDistribution:
+    Type: AWS::CloudFront::Distribution
+    Properties:
+      DistributionConfig:
+        Enabled: true
+        DefaultRootObject: index.html
+        Origins:
+        - Id: S3Origin
+          DomainName:
+            Fn::GetAtt:
+            - FrontendBucket
+            - RegionalDomainName
+          S3OriginConfig:
+            OriginAccessIdentity: ''
+          OriginAccessControlId:
+            Ref: FrontendOAC
+        DefaultCacheBehavior:
+          TargetOriginId: S3Origin
+          ViewerProtocolPolicy: redirect-to-https
+          AllowedMethods:
+          - GET
+          - HEAD
+          CachedMethods:
+          - GET
+          - HEAD
+          ForwardedValues:
+            QueryString: true
+            Headers:
+            - Origin
+        ViewerCertificate:
+          CloudFrontDefaultCertificate: true
+Outputs:
+  ApiUrl:
+    Description: "API Gateway\u306EURL"
+    Value:
+      Fn::Sub: https://${NamingApi}.execute-api.${AWS::Region}.amazonaws.com/prod/naming
+  FrontendURL:
+    Description: "CloudFront\u7D4C\u7531\u3067\u30A2\u30AF\u30BB\u30B9\u3059\u308B\
+      \u30D5\u30ED\u30F3\u30C8\u30A8\u30F3\u30C9\u306EURL"
+    Value:
+      Fn::Sub: https://${FrontendDistribution.DomainName}

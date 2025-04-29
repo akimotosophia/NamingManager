@@ -1,0 +1,138 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: 命名ジェネレーターインフラ (SAM版)
+
+Parameters:
+  CIDRBlock:
+    Type: String
+    Description: 社内IPアドレス(CIDR)
+
+Resources:
+  ## DynamoDB
+  NamingRuleTable:
+    Type: AWS::Serverless::SimpleTable
+    Properties:
+      TableName: naming-rule-table
+      PrimaryKey:
+        Name: RULE_ID
+        Type: String
+
+  ## Lambda Function
+  NamingGeneratorFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: naming-generator-lambda
+      Runtime: python3.12
+      Handler: app.lambda_handler
+      CodeUri: ../backend/src/
+      Policies:
+        - DynamoDBReadPolicy:
+            TableName: naming-rule-table
+      Events:
+        NamingApi:
+          Type: Api
+          Properties:
+            Path: /naming
+            Method: get
+            RestApiId: !Ref NamingApi
+            Auth:
+              ResourcePolicy:
+                IpRangeWhitelist:
+                  - !Ref CIDRBlock
+        NamingApiOptions:
+          Type: Api
+          Properties:
+            Path: /naming
+            Method: options
+            RestApiId: !Ref NamingApi
+            Auth:
+              ResourcePolicy:
+                IpRangeWhitelist:
+                  - !Ref CIDRBlock
+
+  ## API Gateway
+  NamingApi:
+    Type: AWS::Serverless::Api
+    Properties:
+      Name: naming-generator-api
+      StageName: prod
+      Cors:
+        AllowOrigin: "'*'"  # CORSを許可するオリジン（ここでは全てのオリジンを許可）
+        AllowMethods: "'GET,OPTIONS'"  # 許可するHTTPメソッド
+        AllowHeaders: "'Content-Type,Authorization'"  # 許可するヘッダー
+
+  ## S3 Bucket for Frontend
+  FrontendBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: naming-generator-frontend-bucket
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: false
+        BlockPublicPolicy: false
+        IgnorePublicAcls: false
+        RestrictPublicBuckets: false
+
+  ## S3 Bucket Policy (CIDR制限付き)
+  FrontendBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref FrontendBucket
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: PublicReadGetObject
+            Effect: Allow
+            Principal: "*"
+            Action: "s3:GetObject"
+            Resource: !Sub "${FrontendBucket.Arn}/*"
+            Condition:
+              IpAddress:
+                aws:SourceIp: !Ref CIDRBlock
+
+  ## --- CloudFront Origin Access Control ---
+  FrontendOAC:
+    Type: AWS::CloudFront::OriginAccessControl
+    Properties:
+      OriginAccessControlConfig:
+        Name: !Sub "${AWS::StackName}-oac"
+        SigningProtocol: sigv4
+        SigningBehavior: always
+        OriginAccessControlOriginType: s3
+
+  ## --- CloudFront Distribution ---
+  FrontendDistribution:
+    Type: AWS::CloudFront::Distribution
+    Properties:
+      DistributionConfig:
+        Enabled: true
+        DefaultRootObject: index.html
+        Origins:
+          - Id: S3Origin
+            DomainName: !GetAtt FrontendBucket.RegionalDomainName
+            S3OriginConfig:
+              OriginAccessIdentity: ""
+            OriginAccessControlId: !Ref FrontendOAC
+        DefaultCacheBehavior:
+          TargetOriginId: S3Origin
+          ViewerProtocolPolicy: redirect-to-https
+          AllowedMethods:
+            - GET
+            - HEAD
+          CachedMethods:
+            - GET
+            - HEAD
+          ForwardedValues:
+            QueryString: true
+            Headers:
+              - Origin
+        ViewerCertificate:
+          CloudFrontDefaultCertificate: true
+
+Outputs:
+  ApiUrl:
+    Description: "API GatewayのURL"
+    Value: !Sub "https://${NamingApi}.execute-api.${AWS::Region}.amazonaws.com/prod/naming"
+
+  FrontendURL:
+    Description: "CloudFront経由でアクセスするフロントエンドのURL"
+    Value: !Sub "https://${FrontendDistribution.DomainName}"

@@ -25,6 +25,9 @@ Resources:
       Runtime: python3.12
       Handler: app.lambda_handler
       CodeUri: ../backend/src/
+      LoggingConfig:
+        ApplicationLogLevel: DEBUG
+        LogFormat: JSON
       Policies:
         - DynamoDBReadPolicy:
             TableName: naming-rule-table
